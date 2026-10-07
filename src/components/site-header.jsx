@@ -1,7 +1,6 @@
 import React from 'react'
 import { ExternalLink, Palette } from 'lucide-react'
-import { CHAIN, shortenAddress } from '../lib/psyrob'
-import { DEPLOYED_POOL_ADDRESS } from '../App'
+import { POOL_ADDRESS, explorerAddress, shortenAddress } from '../lib/psyrob'
 
 export function SiteHeader({ path }) {
   const link = (href, label) => {
@@ -25,8 +24,8 @@ export function SiteHeader({ path }) {
         <nav className="flex items-center gap-2 text-xs font-semibold">
           {link('#/', 'Play')}
           {link('#/deploy', 'Deploy')}
-          <a className="hidden sm:inline-flex items-center gap-1 px-3 py-1.5 text-paper/60 hover:text-paper" href={`${CHAIN.explorer}/address/${DEPLOYED_POOL_ADDRESS}`} target="_blank" rel="noreferrer">
-            {shortenAddress(DEPLOYED_POOL_ADDRESS)} <ExternalLink size={13} />
+          <a className="hidden sm:inline-flex items-center gap-1 px-3 py-1.5 text-paper/60 hover:text-paper" href={explorerAddress(POOL_ADDRESS)} target="_blank" rel="noreferrer">
+            {shortenAddress(POOL_ADDRESS)} <ExternalLink size={13} />
           </a>
         </nav>
       </div>
