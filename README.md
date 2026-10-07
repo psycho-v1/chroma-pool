@@ -25,7 +25,9 @@ Play: https://psycho-v1.github.io/chroma-pool/
 
 `0x8202C6768562BEBe8A138E4A6e67363BeE552f98`
 
-Constructor minted 1,000,000 COLOR into the contract. Players use this address. The Deploy page can compile and deploy another pool; it does not replace the live one.
+Constructor minted 1,000,000 COLOR into the contract. Players use this address. The pool is already deployed; the site only plays it and has no deployment page.
+
+Source: [src/contracts/ColorPool.sol](src/contracts/ColorPool.sol). The live bytecode matches that file compiled with solc 0.8.28 at its default settings (no optimizer).
 
 The public RPC does not send CORS headers, so the page reads the chain through MetaMask (`eth_call`) once the wallet is on chain 87870.
 
@@ -40,7 +42,3 @@ The public RPC does not send CORS headers, so the page reads the chain through M
 Every transaction first moves MetaMask to chain 87870. If the wallet is on another network the page asks to switch, and sends nothing when the switch is declined.
 
 Pigments: 0 vermilion, 1 marigold, 2 sap, 3 cerulean, 4 indigo, 5 orchid, 6 ivory, 7 lampblack.
-
-## Deploy page
-
-`/#/deploy` compiles [src/contracts/ColorPool.sol](src/contracts/ColorPool.sol) (bundled as text with Vite's `?raw` import, so there is one copy of the source) in the browser (Solidity 0.8.28, `evmVersion: shanghai`, optimizer 200), rejects PREVRANDAO and post-Shanghai opcodes, and sends a legacy type-0 deployment at the fixed gas price.
