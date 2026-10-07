@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { ExternalLink } from 'lucide-react'
-import { COLOR_POOL_SOURCE } from '../contracts/ColorPool.source'
+// The compiler is fed the .sol file itself, so the page can never deploy a stale copy of it.
+import COLOR_POOL_SOURCE from '../contracts/ColorPool.sol?raw'
 import { compileColorPool } from '../lib/compile'
 import {
   CHAIN,
@@ -24,7 +25,7 @@ export default function Deploy() {
 
   async function connect() {
     setError('')
-    setBusy('Connecting…')
+    setBusy('connect')
     try { setAccount((await connectWallet()).address) }
     catch (err) { setError(explainError(err)) }
     finally { setBusy('') }
@@ -33,7 +34,9 @@ export default function Deploy() {
   async function compile() {
     setError('')
     setDeployed('')
-    setBusy('Loading Solidity 0.8.28…')
+    setTx('')
+    setCompiled(null)
+    setBusy('compile')
     try { setCompiled(await compileColorPool(COLOR_POOL_SOURCE)) }
     catch (err) { setError(explainError(err)); setCompiled(null) }
     finally { setBusy('') }
@@ -42,11 +45,14 @@ export default function Deploy() {
   async function deploy() {
     setError('')
     setTx('')
-    let size
-    try { size = BigInt(poolSize.trim()) } catch { setError('Pool size must be a whole number.'); return }
-    if (size < 0n || size > 1000000n) { setError('Initial pool must be from 0 to 1,000,000 COLOR.'); return }
+    setDeployed('')
+    // BigInt() alone would accept '' as 0 and '0x10' as 16.
+    const text = poolSize.trim()
+    if (!/^\d{1,7}$/.test(text)) { setError('Pool size must be a whole number from 0 to 1,000,000.'); return }
+    const size = BigInt(text)
+    if (size > 1000000n) { setError('Initial pool must be from 0 to 1,000,000 COLOR.'); return }
     if (!compiled) { setError('Compile the contract first.'); return }
-    setBusy('Deploying a legacy transaction…')
+    setBusy('deploy')
     try {
       const wallet = await connectWallet()
       setAccount(wallet.address)
@@ -70,9 +76,9 @@ export default function Deploy() {
         value: '0x0',
       }])
       setTx(hash)
-      setBusy('Waiting for the contract address…')
+      setBusy('mining')
       const receipt = await waitReceipt(wallet.provider, hash)
-      if (!receipt || Number(receipt.status) !== 1 || !receipt.contractAddress) {
+      if (Number(receipt.status) !== 1 || !receipt.contractAddress) {
         throw new Error('Deployment was mined and failed.')
       }
       setDeployed(receipt.contractAddress)
@@ -101,10 +107,10 @@ export default function Deploy() {
 
       <div className="mt-5 flex flex-wrap gap-3">
         <button onClick={connect} disabled={Boolean(busy)} className="px-5 py-3 rounded-xl border border-paper/15 disabled:opacity-50">{account ? shortenAddress(account) : 'Connect'}</button>
-        <button onClick={compile} disabled={Boolean(busy)} className="px-5 py-3 rounded-xl bg-paper text-ink font-bold disabled:opacity-50">{busy && !compiled ? busy : 'Compile'}</button>
-        <button onClick={deploy} disabled={Boolean(busy) || !compiled} className="px-5 py-3 rounded-xl bg-cinnabar text-ink font-bold disabled:opacity-50">Deploy new pool</button>
+        <button onClick={compile} disabled={Boolean(busy)} className="px-5 py-3 rounded-xl bg-paper text-ink font-bold disabled:opacity-50">{busy === 'compile' ? 'Compiling…' : 'Compile'}</button>
+        <button onClick={deploy} disabled={Boolean(busy) || !compiled} className="px-5 py-3 rounded-xl bg-cinnabar text-ink font-bold disabled:opacity-50">{busy === 'deploy' || busy === 'mining' ? 'Deploying…' : 'Deploy new pool'}</button>
       </div>
-      {busy && <p className="mt-4 text-sm text-paper/60">{busy}</p>}
+      {busy && <p className="mt-4 text-sm text-paper/60">{BUSY_TEXT[busy]}</p>}
       {compiled && <p className="mt-4 text-sm text-paper/70">Compiled {compiled.version}. Init code {compiled.initBytes.toLocaleString()} bytes. BLOCKHASH present, PREVRANDAO absent.</p>}
       {error && <p className="mt-4 text-sm text-red-300">{error}</p>}
       {tx && <a className="mt-4 inline-flex items-center gap-1 text-sm text-cinnabar" href={explorerTx(tx)} target="_blank" rel="noreferrer">Deployment transaction <ExternalLink size={14} /></a>}
@@ -119,15 +125,23 @@ export default function Deploy() {
   )
 }
 
+const BUSY_TEXT = {
+  connect: 'Connecting…',
+  compile: 'Loading Solidity 0.8.28…',
+  deploy: 'Deploying a legacy transaction…',
+  mining: 'Waiting for the contract address…',
+}
+
 function Fact({ k, v }) {
   return <div className="rounded-2xl border border-paper/10 bg-clay px-4 py-3"><div className="text-paper/40 text-xs uppercase tracking-[.14em]">{k}</div><div className="mt-1">{v}</div></div>
 }
 
+// PSYROB makes a block about every 15 s, so allow a dozen blocks before giving up on the receipt.
 async function waitReceipt(provider, hash) {
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 90; i++) {
     const receipt = await provider.getTransactionReceipt(hash)
     if (receipt) return receipt
-    await new Promise((resolve) => setTimeout(resolve, 1500))
+    await new Promise((resolve) => setTimeout(resolve, 2000))
   }
-  throw new Error('Timed out waiting for the deployment receipt.')
+  throw new Error('The deployment is still pending after 3 minutes. Follow the transaction link; its receipt carries the new contract address.')
 }

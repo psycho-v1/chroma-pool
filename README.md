@@ -31,14 +31,16 @@ The public RPC does not send CORS headers, so the page reads the chain through M
 
 ## Play
 
-1. Connect MetaMask on PSYROB.
+1. Connect MetaMask on PSYROB. A wallet that already trusts the page reconnects on reload.
 2. Pick a pigment and lock it.
 3. Wait until the next block. The page shows the rolled color from `preview`.
 4. Settle. A match transfers 1 COLOR (0 decimals) to you. A miss closes the round.
 5. If the hash is older than 256 blocks, abandon the guess and lock again.
 
+Every transaction first moves MetaMask to chain 87870. If the wallet is on another network the page asks to switch, and sends nothing when the switch is declined.
+
 Pigments: 0 vermilion, 1 marigold, 2 sap, 3 cerulean, 4 indigo, 5 orchid, 6 ivory, 7 lampblack.
 
 ## Deploy page
 
-`/#/deploy` compiles [src/contracts/ColorPool.sol](src/contracts/ColorPool.sol) in the browser (Solidity 0.8.28, `evmVersion: shanghai`, optimizer 200), rejects PREVRANDAO and post-Shanghai opcodes, and sends a legacy type-0 deployment at the fixed gas price.
+`/#/deploy` compiles [src/contracts/ColorPool.sol](src/contracts/ColorPool.sol) (bundled as text with Vite's `?raw` import, so there is one copy of the source) in the browser (Solidity 0.8.28, `evmVersion: shanghai`, optimizer 200), rejects PREVRANDAO and post-Shanghai opcodes, and sends a legacy type-0 deployment at the fixed gas price.

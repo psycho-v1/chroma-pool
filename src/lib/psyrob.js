@@ -80,23 +80,29 @@ async function walletOnPsyrob() {
   }
 }
 
-async function rpc(method, params) {
-  if (await walletOnPsyrob()) {
+// viaWallet is decided once per snapshot by the caller, so one refresh costs one eth_chainId.
+async function rpc(method, params, viaWallet) {
+  if (viaWallet) {
     return ethereum().request({ method, params })
   }
   let response
+  let body
   try {
     response = await fetch(CHAIN.rpc, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
     })
+    body = await response.json()
   } catch {
-    const err = new Error('This browser cannot read rpc.psyrob.com directly (the RPC sends no CORS header). Connect MetaMask on PSYROB, chain 87870.')
-    err.code = 'RPC_BLOCKED'
+    // A wallet on another network is the usual cause once MetaMask is installed.
+    const err = ethereum()
+      ? new Error('MetaMask is on another network. Switch it to PSYROB (chain 87870) to read the pool.')
+      : new Error('This browser cannot read rpc.psyrob.com directly (the RPC sends no CORS header). Connect MetaMask on PSYROB, chain 87870.')
+    err.code = ethereum() ? 'WRONG_CHAIN' : 'RPC_BLOCKED'
     throw err
   }
-  const body = await response.json()
+  if (!body || typeof body !== 'object') throw new Error(`rpc.psyrob.com answered ${response.status} without a JSON-RPC body.`)
   if (body.error) {
     const err = new Error(body.error.message || 'RPC error')
     err.code = body.error.code
@@ -117,7 +123,12 @@ function decodeRevertData(data) {
 
 export function explainError(err) {
   if (!err) return 'Something failed.'
-  if (err.code === 'RPC_BLOCKED') return err.message
+  if (err.code === 'RPC_BLOCKED' || err.code === 'WRONG_CHAIN') return err.message
+  // ethers wraps wallet errors, so the wallet's own code can sit one or two levels down.
+  const codes = [err.code, err?.info?.error?.code, err?.error?.code]
+  if (codes.includes(4001) || codes.includes('ACTION_REJECTED')) return 'The wallet request was rejected.'
+  if (codes.includes(-32002)) return 'MetaMask already has a request waiting. Open the extension and finish it.'
+  if (err.code === 'TIMEOUT') return 'The transaction is still pending. Follow it in the explorer; the page updates once it is mined.'
   const named = err?.revert?.name || err?.errorName
   if (named && REVERT_TEXT[named]) return REVERT_TEXT[named]
   const fromData = decodeRevertData(err?.data) || decodeRevertData(err?.error?.data) || decodeRevertData(err?.info?.error?.data)
@@ -127,6 +138,9 @@ export function explainError(err) {
     return 'This browser cannot read rpc.psyrob.com directly. Connect MetaMask and switch to PSYROB (chain 87870).'
   }
   if (/user rejected|user denied|ACTION_REJECTED/i.test(msg)) return 'The wallet request was rejected.'
+  if (/insufficient funds/i.test(msg) || err.code === 'INSUFFICIENT_FUNDS') return 'This account does not have enough PSY to pay for gas.'
+  if (/network changed|underlying network changed/i.test(msg)) return 'MetaMask changed network during the request. Switch back to PSYROB (chain 87870) and try again.'
+  if (/invalid account/i.test(msg)) return 'That account is not connected to this page. Connect it in MetaMask and try again.'
   return msg.replace(/^execution reverted:?\s*/i, 'The contract rejected the call. ')
 }
 
@@ -138,7 +152,8 @@ export async function ensureChain() {
   try {
     await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: CHAIN.hex }] })
   } catch (err) {
-    if (err?.code !== 4902 && err?.code !== -32603) throw err
+    const code = err?.data?.originalError?.code ?? err?.code
+    if (code !== 4902 && code !== -32603 && !/unrecognized chain/i.test(err?.message || '')) throw err
     await eth.request({
       method: 'wallet_addEthereumChain',
       params: [{
@@ -153,11 +168,24 @@ export async function ensureChain() {
   }
 }
 
+// The account this site is already allowed to see, without opening a wallet prompt.
+export async function connectedAccount() {
+  const eth = ethereum()
+  if (!eth) return ''
+  try {
+    const accounts = await eth.request({ method: 'eth_accounts' })
+    return accounts?.[0] && isAddress(accounts[0]) ? getAddress(accounts[0]) : ''
+  } catch {
+    return ''
+  }
+}
+
 export async function connectWallet() {
   const eth = ethereum()
   if (!eth) throw new Error('MetaMask was not found. Install MetaMask, then play.')
   const accounts = await eth.request({ method: 'eth_requestAccounts' })
   await ensureChain()
+  // Built after the switch: an ethers provider created on another chain rejects calls with "network changed".
   const provider = new BrowserProvider(eth)
   const signer = await provider.getSigner()
   const address = getAddress(accounts?.[0] || await signer.getAddress())
@@ -178,11 +206,15 @@ export async function readState(player) {
   ]
   if (player && isAddress(player)) calls.push(['balanceOf', [player]], ['preview', [player]])
 
+  const viaWallet = await walletOnPsyrob()
   const [blockHex, ...results] = await Promise.all([
-    rpc('eth_blockNumber', []),
-    ...calls.map(([fn, args]) => rpc('eth_call', [{ to: poolAddr, data: iface.encodeFunctionData(fn, args) }, 'latest'])),
+    rpc('eth_blockNumber', [], viaWallet),
+    ...calls.map(([fn, args]) => rpc('eth_call', [{ to: poolAddr, data: iface.encodeFunctionData(fn, args) }, 'latest'], viaWallet)),
   ])
 
+  if (results.some((raw) => typeof raw !== 'string' || raw === '0x')) {
+    throw new Error(`No ColorPool contract answered at ${shortenAddress(poolAddr)} on this network.`)
+  }
   const decoded = results.map((raw, i) => iface.decodeFunctionResult(calls[i][0], raw))
   const state = {
     block: Number(BigInt(blockHex)),
@@ -209,7 +241,18 @@ export async function readState(player) {
   return state
 }
 
-export async function sendContract(signer, method, args = []) {
+// Sends a pool transaction from `player`. The wallet is moved to PSYROB first, so a wallet that
+// wandered to another network can never be asked to sign this call there.
+export async function sendContract(player, method, args = []) {
+  const eth = ethereum()
+  if (!eth) throw new Error('MetaMask was not found. Install MetaMask, then play.')
+  await ensureChain()
+  const provider = new BrowserProvider(eth)
+  const network = await provider.getNetwork()
+  if (Number(network.chainId) !== CHAIN.id) {
+    throw new Error('MetaMask is not on PSYROB (chain 87870). Switch networks and try again.')
+  }
+  const signer = await provider.getSigner(player)
   const contract = new Contract(POOL_ADDRESS, COLOR_POOL_ABI, signer)
   const populated = await contract[method].populateTransaction(...args)
   return signer.sendTransaction({
@@ -220,6 +263,17 @@ export async function sendContract(signer, method, args = []) {
     gasLimit: populated.gasLimit,
     value: 0n,
   })
+}
+
+// Waits for one confirmation. Gives up after `timeoutMs` so a stuck transaction cannot freeze the page,
+// and follows the replacement when the player speeds the transaction up in MetaMask.
+export async function waitMined(response, timeoutMs = 180000) {
+  try {
+    return await response.wait(1, timeoutMs)
+  } catch (err) {
+    if (err?.code === 'TRANSACTION_REPLACED' && err.reason === 'repriced' && err.receipt) return err.receipt
+    throw err
+  }
 }
 
 export function parseRound(receipt) {

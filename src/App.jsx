@@ -3,12 +3,9 @@ import { SiteHeader } from './components/site-header'
 import Play from './routes/Play'
 import Deploy from './routes/Deploy'
 
-export const DEPLOYED_POOL_ADDRESS = '0x8202C6768562BEBe8A138E4A6e67363BeE552f98'
-
 function currentPath() {
   const raw = window.location.hash.replace(/^#/, '') || '/'
-  if (raw === '/deploy' || raw.startsWith('/deploy')) return '/deploy'
-  return '/'
+  return /^\/deploy(\/|\?|$)/.test(raw) ? '/deploy' : '/'
 }
 
 export default function App() {

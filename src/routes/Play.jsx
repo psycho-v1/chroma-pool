@@ -1,81 +1,105 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { CheckCircle2, CircleHelp, ExternalLink, Loader2, LockKeyhole, RefreshCw, Wallet, XCircle } from 'lucide-react'
+import { getAddress, isAddress } from 'ethers'
 import { PIGMENTS } from '../lib/pigments'
-import { BrowserProvider } from 'ethers'
 import {
   CHAIN,
   POOL_ADDRESS,
   connectWallet,
+  connectedAccount,
   explainError,
+  explorerAddress,
   explorerTx,
   hasWallet,
   parseRound,
   readState,
   sendContract,
   shortenAddress,
+  waitMined,
 } from '../lib/psyrob'
 
-const pigment = (id) => PIGMENTS.find((item) => item.id === Number(id))
+// Number(null) is 0, so an empty selection must not be looked up: it would come back as Vermilion.
+const pigment = (id) => (id === null || id === undefined ? undefined : PIGMENTS.find((item) => item.id === Number(id)))
 const fmt = (value) => {
   try { return Number(value).toLocaleString() } catch { return '0' }
 }
 
 export default function Play() {
-  const [wallet, setWallet] = useState(null)
+  const [account, setAccount] = useState('')
   const [selected, setSelected] = useState(null)
   const [chain, setChain] = useState(null)
   const [readNote, setReadNote] = useState('')
+  const [wrongChain, setWrongChain] = useState(false)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [tx, setTx] = useState('')
   const [result, setResult] = useState(null)
   const [tick, setTick] = useState(0)
 
+  // The account the page is showing right now. Async work compares against it before touching
+  // the screen, so a read or a receipt for a previous account is dropped.
+  const accountRef = useRef('')
+  const readSeq = useRef(0)
+  const shownSeq = useRef(0)
+
   const preview = chain?.preview
   const open = Boolean(preview?.open)
   const selectedPigment = pigment(open ? preview.color : selected)
   const rolledPigment = preview?.ready ? pigment(preview.rolled) : null
+  const poolEmpty = Boolean(chain) && chain.pool === 0n
 
-  async function refresh(address = wallet?.address) {
+  function showAccount(address) {
+    if (address === accountRef.current) return
+    accountRef.current = address
+    setAccount(address)
+    // Everything below described the previous account.
+    setResult(null)
+    setTx('')
+    setError('')
+    setChain((prev) => (prev ? { ...prev, balance: 0n, preview: null } : prev))
+  }
+
+  // Reads overlap: the 4 s poll, the refresh button, the refresh after a transaction.
+  // A read only lands if it started after the one already on screen.
+  async function refresh(address = accountRef.current) {
+    const seq = ++readSeq.current
+    const stale = () => seq < shownSeq.current || address !== accountRef.current
     try {
       const next = await readState(address)
+      if (stale()) return
+      shownSeq.current = seq
       setChain(next)
       setReadNote('')
+      setWrongChain(false)
     } catch (err) {
+      if (stale()) return
+      shownSeq.current = seq
       setReadNote(explainError(err))
+      setWrongChain(err?.code === 'WRONG_CHAIN')
     }
   }
 
   useEffect(() => {
-    let stop = false
-    const run = async () => {
-      try {
-        const next = await readState(wallet?.address)
-        if (!stop) { setChain(next); setReadNote('') }
-      } catch (err) {
-        if (!stop) setReadNote(explainError(err))
-      }
-    }
-    run()
-    const id = setInterval(run, 4000)
-    return () => { stop = true; clearInterval(id) }
-  }, [wallet?.address, tick])
+    refresh()
+    const id = setInterval(() => refresh(), 4000)
+    return () => clearInterval(id)
+  }, [account, tick])
 
   useEffect(() => {
+    let stop = false
+    // A site MetaMask already trusts stays connected across reloads, without a prompt.
+    connectedAccount().then((address) => { if (!stop && address && !accountRef.current) showAccount(address) })
     const eth = window.ethereum
-    if (!eth?.on) return undefined
-    const onAccounts = async (accounts) => {
-      if (!accounts?.length) { setWallet(null); return }
-      try {
-        const provider = new BrowserProvider(eth)
-        const signer = await provider.getSigner()
-        setWallet({ provider, signer, address: await signer.getAddress() })
-      } catch { setWallet(null) }
+    if (!eth?.on) return () => { stop = true }
+    const onAccounts = (accounts) => {
+      const first = accounts?.[0]
+      showAccount(first && isAddress(first) ? getAddress(first) : '')
     }
     const onChain = () => setTick((n) => n + 1)
     eth.on('accountsChanged', onAccounts)
     eth.on('chainChanged', onChain)
     return () => {
+      stop = true
       eth.removeListener?.('accountsChanged', onAccounts)
       eth.removeListener?.('chainChanged', onChain)
     }
@@ -86,7 +110,7 @@ export default function Play() {
     setBusy('connect')
     try {
       const next = await connectWallet()
-      setWallet(next)
+      showAccount(next.address)
       await refresh(next.address)
     } catch (err) {
       setError(explainError(err))
@@ -95,75 +119,59 @@ export default function Play() {
     }
   }
 
-  async function lock() {
-    if (!wallet) return connect()
-    if (selected === null) { setError('Pick one pigment first.'); return }
+  async function send(kind, method, args, onMined) {
+    const player = accountRef.current
+    if (!player) return connect()
     setError('')
+    setBusy(kind)
+    try {
+      const response = await sendContract(player, method, args)
+      setTx(response.hash)
+      const receipt = await waitMined(response)
+      if (!receipt || receipt.status !== 1) throw new Error(`The ${kind} transaction was mined and failed.`)
+      if (accountRef.current !== player) return
+      onMined?.(receipt)
+      await refresh(player)
+    } catch (err) {
+      if (accountRef.current !== player) return
+      setError(explainError(err))
+      // A revert usually means the page was behind the chain (another tab, a slow wallet). Catch up.
+      refresh(player)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  function lock() {
+    if (!account) return connect()
+    if (selected === null) { setError('Pick one pigment first.'); return undefined }
     setResult(null)
-    setBusy('lock')
-    try {
-      const response = await sendContract(wallet.signer, 'lock', [selected])
-      setTx(response.hash)
-      const receipt = await response.wait()
-      if (receipt.status !== 1) throw new Error('The lock transaction was mined and failed.')
-      await refresh(wallet.address)
-    } catch (err) {
-      setError(explainError(err))
-    } finally {
-      setBusy('')
-    }
+    return send('lock', 'lock', [selected])
   }
 
-  async function settle() {
-    if (!wallet) return connect()
-    setError('')
-    setBusy('settle')
-    try {
-      const response = await sendContract(wallet.signer, 'settle', [])
-      setTx(response.hash)
-      const receipt = await response.wait()
-      if (receipt.status !== 1) throw new Error('Settle was mined and failed.')
-      setResult(parseRound(receipt))
-      await refresh(wallet.address)
-    } catch (err) {
-      setError(explainError(err))
-    } finally {
-      setBusy('')
-    }
-  }
-
-  async function abandon() {
-    if (!wallet) return connect()
-    setError('')
-    setBusy('abandon')
-    try {
-      const response = await sendContract(wallet.signer, 'abandon', [])
-      setTx(response.hash)
-      const receipt = await response.wait()
-      if (receipt.status !== 1) throw new Error('Abandon was mined and failed.')
-      setResult(null)
-      await refresh(wallet.address)
-    } catch (err) {
-      setError(explainError(err))
-    } finally {
-      setBusy('')
-    }
-  }
+  const settle = () => send('settle', 'settle', [], (receipt) => setResult(parseRound(receipt)))
+  const abandon = () => send('abandon', 'abandon', [], () => setResult(null))
 
   const statusLine = useMemo(() => {
-    if (!wallet) return 'Connect MetaMask on PSYROB. The roll is blockhash(lock block) mod 8.'
-    if (!preview?.open) return 'Choose a pigment and lock it. The color is fixed by the next block.'
+    if (!account) return 'Connect MetaMask on PSYROB. The roll is blockhash(lock block) mod 8.'
+    if (!preview?.open) {
+      return poolEmpty
+        ? 'The pool is empty. A match pays nothing until the owner fills it.'
+        : 'Choose a pigment and lock it. The color is fixed by the next block.'
+    }
     if (preview.expired) return `Locked in block ${preview.commitBlock}. The hash expired. Abandon it, then lock again.`
     if (!preview.ready) {
-      const left = Math.max(0, preview.commitBlock + 1 - (chain?.block || 0))
-      return left > 0
-        ? `Locked in block ${preview.commitBlock}. Waiting for block ${preview.commitBlock + 1} (now ${chain?.block ?? '…'}).`
-        : `Locked in block ${preview.commitBlock}. The next block is in. Settle to draw.`
+      return (chain?.block || 0) > preview.commitBlock
+        ? `Locked in block ${preview.commitBlock}. Reading that block's hash…`
+        : `Locked in block ${preview.commitBlock}. Waiting for block ${preview.commitBlock + 1} (now ${chain?.block ?? '…'}).`
     }
-    return rolledPigment && selectedPigment && preview.rolled === preview.color
-      ? `${rolledPigment.name} came up. It matches. Settle to take 1 COLOR from the pool.`
-      : `${rolledPigment?.name || 'A color'} came up. Your lock was ${selectedPigment?.name}. Settle to close the round.`
-  }, [wallet, preview, chain?.block, rolledPigment, selectedPigment])
+    if (rolledPigment && selectedPigment && preview.rolled === preview.color) {
+      return poolEmpty
+        ? `${rolledPigment.name} came up. It matches, but the pool is empty, so settling pays nothing.`
+        : `${rolledPigment.name} came up. It matches. Settle to take 1 COLOR from the pool.`
+    }
+    return `${rolledPigment?.name || 'A color'} came up. Your lock was ${selectedPigment?.name}. Settle to close the round.`
+  }, [account, preview, chain?.block, rolledPigment, selectedPigment, poolEmpty])
 
   const primaryDisabled = Boolean(busy)
   let primaryLabel = 'Lock my guess'
@@ -172,8 +180,13 @@ export default function Play() {
   else if (busy === 'settle') primaryLabel = 'Settling…'
   else if (busy === 'abandon') primaryLabel = 'Abandoning…'
   else if (open && preview.expired) { primaryLabel = 'Abandon guess'; primaryAction = abandon }
-  else if (open && preview.ready) { primaryLabel = preview.rolled === preview.color ? 'Settle and take 1 COLOR' : 'Settle round'; primaryAction = settle }
+  else if (open && preview.ready) { primaryLabel = preview.rolled === preview.color && !poolEmpty ? 'Settle and take 1 COLOR' : 'Settle round'; primaryAction = settle }
   else if (open) { primaryLabel = 'Waiting for the next block'; primaryAction = () => {} }
+
+  let connectLabel = 'Connect MetaMask'
+  if (busy === 'connect') connectLabel = 'Connecting…'
+  else if (account && wrongChain) connectLabel = 'Switch to PSYROB'
+  else if (account) connectLabel = shortenAddress(account)
 
   const swatch = rolledPigment && open && preview.ready ? rolledPigment : selectedPigment
 
@@ -185,10 +198,10 @@ export default function Play() {
           <h1 className="font-display text-5xl sm:text-7xl leading-[.9] mt-5 max-w-3xl">Guess the color.<br /><span className="text-cinnabar">Trust the chain.</span></h1>
           <p className="mt-6 text-paper/65 text-lg max-w-xl leading-relaxed">Lock one of eight pigments. The next block's hash picks the color. A match pays 1 COLOR out of the pool this contract keeps.</p>
           <div className="mt-8 flex flex-wrap gap-3">
-            <button onClick={connect} className="px-5 py-3 rounded-xl bg-paper text-ink font-bold hover:opacity-90 flex items-center gap-2">
-              <Wallet size={18} />{wallet ? shortenAddress(wallet.address) : 'Connect MetaMask'}
+            <button onClick={connect} disabled={busy === 'connect'} className="px-5 py-3 rounded-xl bg-paper text-ink font-bold hover:opacity-90 disabled:opacity-60 flex items-center gap-2">
+              <Wallet size={18} />{connectLabel}
             </button>
-            <a href={`${CHAIN.explorer}/address/${POOL_ADDRESS}`} target="_blank" rel="noreferrer" className="px-5 py-3 rounded-xl border border-paper/15 text-paper/75 hover:bg-paper/5 flex items-center gap-2">
+            <a href={explorerAddress(POOL_ADDRESS)} target="_blank" rel="noreferrer" className="px-5 py-3 rounded-xl border border-paper/15 text-paper/75 hover:bg-paper/5 flex items-center gap-2">
               View pool <ExternalLink size={16} />
             </a>
           </div>
@@ -202,7 +215,7 @@ export default function Play() {
           </div>
           <div className="grid grid-cols-2 gap-3">
             <Stat label="COLOR in pool" value={chain ? fmt(chain.pool) : '—'} />
-            <Stat label="Your COLOR" value={wallet ? fmt(chain?.balance ?? 0) : '—'} />
+            <Stat label="Your COLOR" value={account && chain ? fmt(chain.balance) : '—'} />
             <Stat label="Paid out" value={chain ? fmt(chain.paidOut) : '—'} />
             <Stat label="Block" value={chain?.block || '—'} />
           </div>
@@ -241,7 +254,7 @@ export default function Play() {
                   key={item.id}
                   disabled={Boolean(busy) || open}
                   onClick={() => { setSelected(item.id); setError('') }}
-                  className={`text-left rounded-2xl border p-3 transition disabled:opacity-80 ${active ? 'border-paper ring-2 ring-cinnabar' : 'border-paper/10 hover:border-paper/30'} ${hit ? 'ring-2 ring-emerald-300' : ''}`}
+                  className={`text-left rounded-2xl border p-3 transition disabled:opacity-80 ${hit ? 'border-paper ring-2 ring-emerald-300' : active ? 'border-paper ring-2 ring-cinnabar' : 'border-paper/10 hover:border-paper/30'}`}
                 >
                   <div className="h-16 rounded-xl mb-3 shadow-inner" style={{ background: item.hex }} />
                   <div className="flex items-center justify-between gap-2">
