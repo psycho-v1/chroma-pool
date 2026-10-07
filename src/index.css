@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color: #f3eadf; background: #14110e; font-family: 'Outfit', sans-serif; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: #14110e; }
+button { font: inherit; }
+a { color: inherit; text-decoration: none; }
+::selection { background: #e25b2a; color: #14110e; }
+.well-stir { animation: stir 7s ease-in-out infinite; }
+@keyframes stir { 0%,100% { transform: rotate(-1deg) translateY(0) } 50% { transform: rotate(1deg) translateY(-2px) } }
+.grain { background-image: radial-gradient(rgba(243,234,223,.07) 1px, transparent 1px); background-size: 7px 7px; }
