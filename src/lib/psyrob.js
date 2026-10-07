@@ -1,4 +1,4 @@
-import { AbiCoder, BrowserProvider, Contract, Interface, getAddress, isAddress } from 'ethers'
+import { BrowserProvider, Contract, Interface, getAddress, isAddress } from 'ethers'
 
 export const CHAIN = {
   id: 87870,
@@ -7,8 +7,6 @@ export const CHAIN = {
   rpc: 'https://rpc.psyrob.com',
   explorer: 'https://explorer.psyrob.com',
   gasPrice: 47619047619n,
-  gasPriceHex: '0xb165100c3',
-  maxGas: 15000000n,
 }
 
 export const POOL_ADDRESS = '0x8202C6768562BEBe8A138E4A6e67363BeE552f98'
@@ -291,8 +289,4 @@ export function parseRound(receipt) {
     } catch { /* other log */ }
   }
   return null
-}
-
-export function encodeConstructor(poolSize) {
-  return AbiCoder.defaultAbiCoder().encode(['uint256'], [poolSize])
 }
